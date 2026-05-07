@@ -67,9 +67,14 @@ type Replaces struct {
 	Constraint string `toml:"constraint"`
 }
 
-// Load reads and parses a recipe from path. Unknown TOML keys are rejected
-// so that typos in field names surface as parse errors rather than silently-
-// dropped fields.
+// Load reads and parses a recipe from path.
+//
+// Unknown keys WITHIN sections that peipkg-build owns ([meta] and
+// [[package]]) are rejected as typos. Unknown TOP-LEVEL sections are
+// tolerated: the recipe is a shared file format and other tools (notably
+// peipkg-manager, which reads [upstream] and [watch] sections for
+// upstream-tracking and webhook configuration) may carry their own
+// configuration alongside the build instructions in the same file.
 func Load(path string) (Recipe, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -81,14 +86,38 @@ func Load(path string) (Recipe, error) {
 	if err != nil {
 		return Recipe{}, fmt.Errorf("parse %s: %w", path, err)
 	}
-	if extras := md.Undecoded(); len(extras) > 0 {
-		return Recipe{}, fmt.Errorf("parse %s: unknown keys %v", path, extras)
+	if extras := unknownKeysInOwnedSections(md.Undecoded()); len(extras) > 0 {
+		return Recipe{}, fmt.Errorf("parse %s: unknown keys %v (typos? unknown keys in [meta] or [[package]] are rejected; unknown top-level sections are tolerated for other tools)", path, extras)
 	}
 
 	if err := r.Validate(); err != nil {
 		return Recipe{}, fmt.Errorf("validate %s: %w", path, err)
 	}
 	return r, nil
+}
+
+// ownedTopLevelSections lists the top-level TOML sections peipkg-build is
+// authoritative for. Unknown keys nested under these surface as typo
+// errors; everything else is left for other tools to interpret.
+var ownedTopLevelSections = map[string]bool{
+	"meta":    true,
+	"package": true,
+}
+
+// unknownKeysInOwnedSections filters md.Undecoded() down to the keys that
+// nest under sections peipkg-build owns. Other keys (e.g. an `[upstream]`
+// section interpreted by peipkg-manager) pass through silently.
+func unknownKeysInOwnedSections(undecoded []toml.Key) []toml.Key {
+	var out []toml.Key
+	for _, k := range undecoded {
+		if len(k) == 0 {
+			continue
+		}
+		if ownedTopLevelSections[k[0]] {
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // Validate checks structural invariants of the recipe. It does not validate

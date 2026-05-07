@@ -1,6 +1,7 @@
 package recipe
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -76,5 +77,101 @@ func TestValidateRejectsDuplicatePackageNames(t *testing.T) {
 	err := r.Validate()
 	if err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Errorf("Validate error = %v, want one mentioning duplicate", err)
+	}
+}
+
+// TestLoadAcceptsForeignTopLevelSections verifies the parser tolerates
+// unknown top-level sections — these are reserved for other tools that
+// share the recipe file (notably peipkg-manager's [upstream] and
+// [watch] sections).
+func TestLoadAcceptsForeignTopLevelSections(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "peipkg.toml")
+	body := `
+[meta]
+license = "MIT"
+build_script = "build.sh"
+
+[[package]]
+name = "x"
+architecture = "noarch"
+
+# Sections not owned by peipkg-build — must NOT cause a parse error.
+[upstream]
+git = "https://example.com/x.git"
+tag_pattern = "^v(\\d+)$"
+
+[watch]
+poll_interval = "1h"
+
+[anything-else]
+foo = "bar"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load rejected recipe with foreign top-level sections: %v", err)
+	}
+	if r.Meta.License != "MIT" {
+		t.Errorf("Meta.License = %q, want MIT", r.Meta.License)
+	}
+	if len(r.Packages) != 1 || r.Packages[0].Name != "x" {
+		t.Errorf("expected exactly one package named x, got %v", r.Packages)
+	}
+}
+
+// TestLoadRejectsUnknownKeysInMeta verifies the typo guard still fires
+// for keys that ARE under sections peipkg-build owns.
+func TestLoadRejectsUnknownKeysInMeta(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "peipkg.toml")
+	body := `
+[meta]
+license = "MIT"
+build_script = "build.sh"
+homepag = "typo"   # typo of homepage
+
+[[package]]
+name = "x"
+architecture = "noarch"
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load accepted recipe with typo in [meta]")
+	}
+	if !strings.Contains(err.Error(), "homepag") {
+		t.Errorf("error did not mention the typo'd key: %v", err)
+	}
+}
+
+// TestLoadRejectsUnknownKeysInPackage verifies the typo guard fires for
+// keys nested under [[package]] too.
+func TestLoadRejectsUnknownKeysInPackage(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "peipkg.toml")
+	body := `
+[meta]
+license = "MIT"
+build_script = "build.sh"
+
+[[package]]
+name = "x"
+architecture = "noarch"
+fles = ["usr/bin/x"]   # typo of files
+`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load accepted recipe with typo in [[package]]")
+	}
+	if !strings.Contains(err.Error(), "fles") {
+		t.Errorf("error did not mention the typo'd key: %v", err)
 	}
 }
