@@ -1,0 +1,45 @@
+[meta]
+license = "MIT"
+homepage = "https://peios.org"
+build_script = "build.sh"
+
+# Three-stanza fixture exercising:
+#   - the partitioner across multiple [[package]] stanzas
+#   - the cross-package symlink case (libfoo.so in -dev points at
+#     libfoo.so.1 which lives in the runtime package)
+#   - the same_build = true shorthand resolving to "= <version>"
+#   - per-package architecture mix (x86_64 + noarch)
+#   - per-package side_effects (ldconfig, man-db)
+
+[[package]]
+name = "libfoo"
+architecture = "x86_64"
+description = "Multi-package fixture: runtime shared library."
+dependencies = [{ name = "libc" }]
+side_effects = ["ldconfig"]
+files = [
+  "usr/lib/x86_64-linux-peios/libfoo.so.1",
+  "usr/lib/x86_64-linux-peios/libfoo.so.1.*",
+]
+
+[[package]]
+name = "libfoo-dev"
+architecture = "x86_64"
+description = "Multi-package fixture: development files."
+dependencies = [
+  { name = "libfoo", same_build = true },
+  { name = "libc-dev" },
+]
+files = [
+  "usr/include/**",
+  "usr/lib/x86_64-linux-peios/libfoo.so",
+  "usr/lib/x86_64-linux-peios/libfoo.a",
+  "usr/lib/x86_64-linux-peios/pkgconfig/**",
+]
+
+[[package]]
+name = "libfoo-doc"
+architecture = "noarch"
+description = "Multi-package fixture: man pages (architecture-independent)."
+side_effects = ["man-db"]
+files = ["usr/share/man/**"]

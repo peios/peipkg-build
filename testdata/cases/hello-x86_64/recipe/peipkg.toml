@@ -1,0 +1,14 @@
+[meta]
+license = "Apache-2.0"
+homepage = "https://peios.org"
+build_script = "build.sh"
+
+[[package]]
+name = "hello"
+architecture = "x86_64"
+description = "x86_64 fixture: triplet path, symlink chain, ldconfig side effect, signed."
+side_effects = ["ldconfig"]
+files = [
+  "usr/lib/x86_64-linux-peios/libhello.so.1",
+  "usr/lib/x86_64-linux-peios/libhello.so.1.*",
+]

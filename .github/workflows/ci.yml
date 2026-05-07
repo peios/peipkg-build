@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Static analysis + unit/integration tests. Owns "the code is sound."
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt found unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -count=1 -race ./...
+
+  # End-to-end CLI exercise. Builds each fixture via the peipkg-build
+  # binary and validates the output with scripts/verify.sh. This catches
+  # regressions in the CLI ↔ fixture surface that aren't covered by the
+  # Go test suite (which exercises the library APIs).
+  fixtures:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install verify.sh dependencies
+        run: |
+          # ubuntu-latest already ships zstd and python3; this guards
+          # against future image changes.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends zstd python3
+
+      - name: Build CLI
+        run: go build -o /tmp/peipkg-build ./cmd/peipkg-build
+
+      - name: hello-noarch (unsigned)
+        run: |
+          mkdir -p /tmp/out-hello-noarch
+          /tmp/peipkg-build build \
+            --recipe testdata/cases/hello-noarch/recipe/peipkg.toml \
+            --source testdata/cases/hello-noarch/staged \
+            --version 0.1-1 \
+            --source-ref test://hello-noarch \
+            --farm-id ci-farm \
+            --timestamp 2026-05-06T12:00:00Z \
+            --out /tmp/out-hello-noarch
+          bash scripts/verify.sh /tmp/out-hello-noarch/hello_0.1-1_noarch.peipkg
+
+      - name: hello-x86_64 (signed)
+        run: |
+          mkdir -p /tmp/out-hello-x86_64
+          /tmp/peipkg-build build \
+            --recipe testdata/cases/hello-x86_64/recipe/peipkg.toml \
+            --source testdata/cases/hello-x86_64/staged \
+            --version 1.2.3-1 \
+            --source-ref test://hello-x86_64 \
+            --farm-id ci-farm \
+            --timestamp 2026-05-06T12:00:00Z \
+            --out /tmp/out-hello-x86_64 \
+            --sign-key testdata/keys/test-signing.ed25519
+          bash scripts/verify.sh /tmp/out-hello-x86_64/hello_1.2.3-1_x86_64.peipkg
+
+      - name: libfoo-multipackage (signed)
+        run: |
+          mkdir -p /tmp/out-libfoo
+          /tmp/peipkg-build build \
+            --recipe testdata/cases/libfoo-multipackage/recipe/peipkg.toml \
+            --source testdata/cases/libfoo-multipackage/staged \
+            --version 1.0.0-1 \
+            --source-ref test://libfoo-multipackage \
+            --farm-id ci-farm \
+            --timestamp 2026-05-06T12:00:00Z \
+            --out /tmp/out-libfoo \
+            --sign-key testdata/keys/test-signing.ed25519
+          for pkg in /tmp/out-libfoo/*.peipkg; do
+            echo "verifying $(basename "$pkg")"
+            bash scripts/verify.sh "$pkg"
+          done
+
+      - name: Determinism check (libfoo-multipackage)
+        run: |
+          # Building the same fixture twice MUST produce byte-identical
+          # output; this is the core reproducibility guarantee per
+          # PSD-009 §3.1.4.
+          mkdir -p /tmp/out-libfoo-2
+          /tmp/peipkg-build build \
+            --recipe testdata/cases/libfoo-multipackage/recipe/peipkg.toml \
+            --source testdata/cases/libfoo-multipackage/staged \
+            --version 1.0.0-1 \
+            --source-ref test://libfoo-multipackage \
+            --farm-id ci-farm \
+            --timestamp 2026-05-06T12:00:00Z \
+            --out /tmp/out-libfoo-2 \
+            --sign-key testdata/keys/test-signing.ed25519
+          for pkg in /tmp/out-libfoo/*.peipkg; do
+            base=$(basename "$pkg")
+            if ! cmp -s "/tmp/out-libfoo/$base" "/tmp/out-libfoo-2/$base"; then
+              echo "::error::$base not byte-identical across two builds"
+              exit 1
+            fi
+          done
+
+  # Build and publish a "latest" release on every push to main. PR builds
+  # do not release; this job is gated on the push event and the main
+  # branch. Matches the per-subproject release pattern used by trail.
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    needs: [test, fixtures]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build static linux/amd64 binary
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w" \
+            -o peipkg-build-linux-amd64 ./cmd/peipkg-build
+
+      - name: Build static linux/arm64 binary
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -trimpath -ldflags="-s -w" \
+            -o peipkg-build-linux-arm64 ./cmd/peipkg-build
+
+      - name: Update latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes 2>/dev/null || true
+          git tag -f latest
+          git push -f origin latest
+          gh release create latest \
+            peipkg-build-linux-amd64 peipkg-build-linux-arm64 \
+            --title "Latest Build" \
+            --notes "Built from $(git rev-parse --short HEAD) on $(date -u +%Y-%m-%d)"

@@ -1,0 +1,10 @@
+prefix=/usr
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib/x86_64-linux-peios
+includedir=${prefix}/include
+
+Name: foo
+Description: peipkg-build libfoo-multipackage fixture
+Version: 1.0.0
+Libs: -L${libdir} -lfoo
+Cflags: -I${includedir}

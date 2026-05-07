@@ -1,0 +1,12 @@
+[meta]
+license = "CC0-1.0"
+homepage = "https://peios.org"
+build_script = "build.sh"
+
+[[package]]
+name = "hello"
+architecture = "noarch"
+description = "Smallest legal peipkg test fixture."
+files = [
+  "usr/share/hello/MESSAGE",
+]
