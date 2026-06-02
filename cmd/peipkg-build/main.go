@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/peios/peipkg-build/internal/binsign"
 	"github.com/peios/peipkg-build/internal/builder"
 	"github.com/peios/peipkg-build/internal/manifest"
 	"github.com/peios/peipkg-build/internal/pack"
@@ -41,6 +42,8 @@ func main() {
 		err = cmdPack(args)
 	case "build":
 		err = cmdBuild(ctx, args)
+	case "binary-sign":
+		err = cmdBinarySign(args)
 	case "-h", "--help", "help":
 		usage(os.Stdout)
 		return
@@ -59,8 +62,41 @@ func usage(w *os.File) {
 	fmt.Fprintln(w, "usage: peipkg-build <subcommand> [flags]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "subcommands:")
-	fmt.Fprintln(w, "  build   run a recipe end-to-end and emit one .peipkg per [[package]]")
-	fmt.Fprintln(w, "  pack    emit one .peipkg from a manifest.json + staged tree")
+	fmt.Fprintln(w, "  build         run a recipe end-to-end and emit one .peipkg per [[package]]")
+	fmt.Fprintln(w, "  pack          emit one .peipkg from a manifest.json + staged tree")
+	fmt.Fprintln(w, "  binary-sign   embed a .peios.sig (PIP) signature into an ELF binary in place")
+}
+
+// cmdBinarySign implements the `binary-sign` subcommand: a low-level entry
+// point that embeds a Peios binary signature (the .peios.sig ELF section the
+// kernel verifies at exec for PIP trust) into an ELF in place. This is
+// separate from package signing; see peios/binary-signing-design.md.
+func cmdBinarySign(args []string) error {
+	fs := flag.NewFlagSet("binary-sign", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintln(fs.Output(), "usage: peipkg-build binary-sign --in PATH --key PATH")
+		fs.PrintDefaults()
+	}
+	inPath := fs.String("in", "", "path to the ELF binary to sign in place (required)")
+	keyPath := fs.String("key", "", "path to the Ed25519 binary-signing private key (PEM or 32-byte raw seed) (required)")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *inPath == "" || *keyPath == "" {
+		fs.Usage()
+		return fmt.Errorf("--in and --key are both required")
+	}
+
+	priv, err := signature.LoadPrivateKey(*keyPath)
+	if err != nil {
+		return err
+	}
+	signer, err := binsign.NewKeySigner(priv)
+	if err != nil {
+		return err
+	}
+	return binsign.SignELF(*inPath, signer)
 }
 
 // cmdPack implements the `pack` subcommand: a low-level entry point that
