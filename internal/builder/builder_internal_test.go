@@ -235,6 +235,22 @@ func TestValidateRejectsBareUsrLib(t *testing.T) {
 	}
 }
 
+func TestValidateAcceptsBootSymlinkAndFile(t *testing.T) {
+	// /boot/ is a §3.4.1 permitted destination admitting both real files
+	// and symlinks. The SHOULD-be-symlinks rule (§3.4.1) is not enforced
+	// at format-validation time. The canonical kernel-package pattern:
+	// real bzImage under /usr/lib/<triplet>/, /boot/ symlink for
+	// bootloader discovery.
+	pkg := recipe.Package{Name: "kernel", Architecture: "x86_64"}
+	leaves := []leaf{
+		{path: "usr/lib/x86_64-linux-peios/kernel/vmlinuz", kind: leafFile},
+		{path: "boot/vmlinuz", kind: leafSymlink, linkTarget: "../usr/lib/x86_64-linux-peios/kernel/vmlinuz"},
+	}
+	if err := runValidate(t, pkg, leaves); err != nil {
+		t.Errorf("expected accept of boot symlink + canonical file, got: %v", err)
+	}
+}
+
 func TestValidateAcceptsInTreeSymlink(t *testing.T) {
 	pkg := recipe.Package{Name: "p", Architecture: "x86_64"}
 	leaves := []leaf{

@@ -516,6 +516,7 @@ var permittedTopLevels = []string{
 	"etc/",
 	"var/",
 	"opt/",
+	"boot/",
 }
 
 // validateClaims runs format-level checks across the post-partition
