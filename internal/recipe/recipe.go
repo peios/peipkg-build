@@ -21,6 +21,18 @@ import (
 type Recipe struct {
 	Meta     Meta      `toml:"meta"`
 	Packages []Package `toml:"package"`
+	Sign     []Sign    `toml:"sign"`
+}
+
+// Sign is one [[sign]] stanza: a request to embed a Peios binary signature
+// (the .peios.sig ELF section the kernel verifies at exec for PIP trust) into
+// a staged output file. Path is relative to $DESTDIR; Key names the signing
+// key the build farm must supply (peipkg-build build --binary-sign-key
+// <Key>=PATH). The recipe declares the intent; the farm authorizes and holds
+// the key. This is separate from package (.peipkg) signing.
+type Sign struct {
+	Path string `toml:"path"`
+	Key  string `toml:"key"`
 }
 
 // Meta carries facts shared across every output package: license, upstream
@@ -102,6 +114,7 @@ func Load(path string) (Recipe, error) {
 var ownedTopLevelSections = map[string]bool{
 	"meta":    true,
 	"package": true,
+	"sign":    true,
 }
 
 // unknownKeysInOwnedSections filters md.Undecoded() down to the keys that
@@ -158,6 +171,15 @@ func (r Recipe) Validate() error {
 			if d.Name == "" {
 				return fmt.Errorf("[[package]] %s: conflicts[%d]: name is required", p.Name, j)
 			}
+		}
+	}
+
+	for i, s := range r.Sign {
+		if s.Path == "" {
+			return fmt.Errorf("[[sign]] #%d: path is required", i)
+		}
+		if s.Key == "" {
+			return fmt.Errorf("[[sign]] %s: key is required", s.Path)
 		}
 	}
 	return nil

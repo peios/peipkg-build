@@ -33,6 +33,7 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 
+	"github.com/peios/peipkg-build/internal/binsign"
 	"github.com/peios/peipkg-build/internal/manifest"
 	"github.com/peios/peipkg-build/internal/pack"
 	"github.com/peios/peipkg-build/internal/recipe"
@@ -77,6 +78,14 @@ type Config struct {
 	// rejected. These are *declared* inputs, not host-environment leakage, so
 	// reproducibility is preserved.
 	BuildEnv map[string]string
+
+	// BinarySigners maps a signing-key name (as referenced by a recipe
+	// [[sign]] stanza's `key`) to the Signer that embeds a .peios.sig
+	// signature into the staged output. The farm supplies only the keys a
+	// recipe is authorized to use; a [[sign]] referencing an absent key is a
+	// hard error. Signing runs after the build script (so it is the last
+	// mutation of the binary) and before partition/pack.
+	BinarySigners map[string]binsign.Signer
 
 	// Stdout and Stderr receive build.sh output. Nil falls back to the
 	// process's os.Stdout / os.Stderr.
@@ -136,6 +145,10 @@ func Build(ctx context.Context, cfg Config) (Result, error) {
 
 	if err := runBuildScript(ctx, cfg, sourceAbs, destDir, workDir, epoch); err != nil {
 		return Result{}, fmt.Errorf("run build script: %w", err)
+	}
+
+	if err := signBinaries(cfg, destDir); err != nil {
+		return Result{}, err
 	}
 
 	leaves, err := collectLeaves(destDir)
@@ -283,6 +296,44 @@ func buildScriptEnv(cfg Config, sourceAbs, destDir string, epoch int64) ([]strin
 		env = append(env, name+"="+cfg.BuildEnv[name])
 	}
 	return env, nil
+}
+
+// signBinaries embeds a .peios.sig signature into each [[sign]]-declared staged
+// output using the named Signer the farm supplied. It runs after the build
+// script (so signing is the binary's last mutation) and before partition/pack
+// (so the signed bytes are what ship). A [[sign]] whose key was not supplied,
+// or whose path escapes $DESTDIR or is missing/not a regular file, is a hard
+// error — silently shipping an unsigned TCB binary is the failure we refuse.
+func signBinaries(cfg Config, destDir string) error {
+	if len(cfg.Recipe.Sign) == 0 {
+		return nil
+	}
+	destAbs, err := filepath.Abs(destDir)
+	if err != nil {
+		return err
+	}
+	for i, s := range cfg.Recipe.Sign {
+		signer, ok := cfg.BinarySigners[s.Key]
+		if !ok {
+			return fmt.Errorf("sign[%d] %s: no signing key named %q supplied (need --binary-sign-key %s=PATH)", i, s.Path, s.Key, s.Key)
+		}
+		clean := filepath.Clean(filepath.FromSlash(s.Path))
+		if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("sign[%d]: path %q escapes $DESTDIR", i, s.Path)
+		}
+		target := filepath.Join(destAbs, clean)
+		info, err := os.Stat(target)
+		if err != nil {
+			return fmt.Errorf("sign[%d]: %s: %w", i, s.Path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("sign[%d]: %s is not a regular file", i, s.Path)
+		}
+		if err := binsign.SignELF(target, signer); err != nil {
+			return fmt.Errorf("sign %s: %w", s.Path, err)
+		}
+	}
+	return nil
 }
 
 // leafKind distinguishes regular files from symlinks at partition time.

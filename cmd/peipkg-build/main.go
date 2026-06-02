@@ -127,6 +127,35 @@ func parseBuildEnv(args stringList) (map[string]string, error) {
 	return out, nil
 }
 
+// parseBinarySigners turns repeated "NAME=PATH" --binary-sign-key args into a
+// map of key-name -> Signer, loading each private key. NAME matches a recipe
+// [[sign]] stanza's `key`.
+func parseBinarySigners(args stringList) (map[string]binsign.Signer, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]binsign.Signer, len(args))
+	for _, a := range args {
+		name, path, ok := strings.Cut(a, "=")
+		if !ok || name == "" || path == "" {
+			return nil, fmt.Errorf("--binary-sign-key %q: expected NAME=PATH", a)
+		}
+		if _, dup := out[name]; dup {
+			return nil, fmt.Errorf("--binary-sign-key %q: duplicate name", name)
+		}
+		priv, err := signature.LoadPrivateKey(path)
+		if err != nil {
+			return nil, err
+		}
+		signer, err := binsign.NewKeySigner(priv)
+		if err != nil {
+			return nil, err
+		}
+		out[name] = signer
+	}
+	return out, nil
+}
+
 // cmdPack implements the `pack` subcommand: a low-level entry point that
 // takes a fully-resolved manifest and a staged payload tree and emits one
 // .peipkg. The build provenance (timestamp, farm_id, source_ref) is read
@@ -211,12 +240,18 @@ func cmdBuild(ctx context.Context, args []string) error {
 
 	var buildEnvArgs stringList
 	fs.Var(&buildEnvArgs, "build-env", "NAME=VALUE injected into the build script env (repeatable; e.g. PKM_KACS_TCB_PUBKEY_HEX=...)")
+	var binarySignArgs stringList
+	fs.Var(&binarySignArgs, "binary-sign-key", "NAME=PATH binary-signing key for [[sign]] stanzas (repeatable)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	buildEnv, err := parseBuildEnv(buildEnvArgs)
+	if err != nil {
+		return err
+	}
+	binarySigners, err := parseBinarySigners(binarySignArgs)
 	if err != nil {
 		return err
 	}
@@ -255,18 +290,19 @@ func cmdBuild(ctx context.Context, args []string) error {
 	}
 
 	res, err := builder.Build(ctx, builder.Config{
-		Recipe:      r,
-		BuildScript: buildScript,
-		SourceDir:   *sourceDir,
-		Version:     *version,
-		SourceRef:   *sourceRef,
-		FarmID:      *farmID,
-		Timestamp:   *timestamp,
-		OutDir:      *outDir,
-		SignKey:     signKey,
-		BuildEnv:    buildEnv,
-		Stdout:      os.Stdout,
-		Stderr:      os.Stderr,
+		Recipe:        r,
+		BuildScript:   buildScript,
+		SourceDir:     *sourceDir,
+		Version:       *version,
+		SourceRef:     *sourceRef,
+		FarmID:        *farmID,
+		Timestamp:     *timestamp,
+		OutDir:        *outDir,
+		SignKey:       signKey,
+		BuildEnv:      buildEnv,
+		BinarySigners: binarySigners,
+		Stdout:        os.Stdout,
+		Stderr:        os.Stderr,
 	})
 	if err != nil {
 		return err
