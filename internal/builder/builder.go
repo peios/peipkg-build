@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -67,6 +68,15 @@ type Config struct {
 	// All packages produced by one Build invocation are signed with this
 	// single key.
 	SignKey ed25519.PrivateKey
+
+	// BuildEnv is a set of declared NAME=VALUE pairs injected into the build
+	// script's environment on top of the hermetic base. It is how the farm
+	// passes build inputs it holds out-of-band — e.g. PKM_KACS_TCB_PUBKEY_HEX
+	// for the kernel's signing-key catalogue. Names that collide with the
+	// reserved hermetic variables, or are not valid shell identifiers, are
+	// rejected. These are *declared* inputs, not host-environment leakage, so
+	// reproducibility is preserved.
+	BuildEnv map[string]string
 
 	// Stdout and Stderr receive build.sh output. Nil falls back to the
 	// process's os.Stdout / os.Stderr.
@@ -214,9 +224,42 @@ func runBuildScript(ctx context.Context, cfg Config, sourceAbs, destDir, workDir
 		stderr = os.Stderr
 	}
 
+	env, err := buildScriptEnv(cfg, sourceAbs, destDir, epoch)
+	if err != nil {
+		return err
+	}
+
 	cmd := exec.CommandContext(ctx, "sh", cfg.BuildScript)
 	cmd.Dir = workDir
-	cmd.Env = []string{
+	cmd.Env = env
+	cmd.Stdin = nil // /dev/null per exec.Cmd docs
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	return cmd.Run()
+}
+
+// reservedBuildEnv names the hermetic variables runBuildScript controls. A
+// caller-supplied BuildEnv entry may not shadow them — that would let a recipe
+// (or its farm config) subvert the staging contract.
+var reservedBuildEnv = map[string]bool{
+	"SOURCE_DIR":        true,
+	"DESTDIR":           true,
+	"SOURCE_DATE_EPOCH": true,
+	"LC_ALL":            true,
+	"TZ":                true,
+	"PATH":              true,
+}
+
+// buildEnvNameRe is the POSIX shell name grammar: a build-env variable name
+// must be a valid identifier so `sh` actually exports it.
+var buildEnvNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// buildScriptEnv builds the environment for the build script: the hermetic
+// base plus any declared BuildEnv entries, emitted in sorted order for
+// determinism. Invalid or reserved BuildEnv names are rejected.
+func buildScriptEnv(cfg Config, sourceAbs, destDir string, epoch int64) ([]string, error) {
+	env := []string{
 		"SOURCE_DIR=" + sourceAbs,
 		"DESTDIR=" + destDir,
 		"SOURCE_DATE_EPOCH=" + strconv.FormatInt(epoch, 10),
@@ -224,11 +267,22 @@ func runBuildScript(ctx context.Context, cfg Config, sourceAbs, destDir, workDir
 		"TZ=UTC",
 		"PATH=" + os.Getenv("PATH"),
 	}
-	cmd.Stdin = nil // /dev/null per exec.Cmd docs
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
 
-	return cmd.Run()
+	names := make([]string, 0, len(cfg.BuildEnv))
+	for name := range cfg.BuildEnv {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if !buildEnvNameRe.MatchString(name) {
+			return nil, fmt.Errorf("build-env: invalid variable name %q", name)
+		}
+		if reservedBuildEnv[name] {
+			return nil, fmt.Errorf("build-env: %q is reserved and cannot be overridden", name)
+		}
+		env = append(env, name+"="+cfg.BuildEnv[name])
+	}
+	return env, nil
 }
 
 // leafKind distinguishes regular files from symlinks at partition time.

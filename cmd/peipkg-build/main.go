@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/peios/peipkg-build/internal/binsign"
@@ -97,6 +98,33 @@ func cmdBinarySign(args []string) error {
 		return err
 	}
 	return binsign.SignELF(*inPath, signer)
+}
+
+// stringList is a flag.Value that accumulates a repeatable string flag.
+type stringList []string
+
+func (s *stringList) String() string     { return strings.Join(*s, ", ") }
+func (s *stringList) Set(v string) error { *s = append(*s, v); return nil }
+
+// parseBuildEnv turns repeated "NAME=VALUE" --build-env args into a map. It
+// checks NAME is present here; the builder enforces the stricter identifier
+// and reserved-name rules when it constructs the build environment.
+func parseBuildEnv(args stringList) (map[string]string, error) {
+	if len(args) == 0 {
+		return nil, nil
+	}
+	out := make(map[string]string, len(args))
+	for _, a := range args {
+		name, value, ok := strings.Cut(a, "=")
+		if !ok || name == "" {
+			return nil, fmt.Errorf("--build-env %q: expected NAME=VALUE", a)
+		}
+		if _, dup := out[name]; dup {
+			return nil, fmt.Errorf("--build-env %q: duplicate name", name)
+		}
+		out[name] = value
+	}
+	return out, nil
 }
 
 // cmdPack implements the `pack` subcommand: a low-level entry point that
@@ -181,7 +209,15 @@ func cmdBuild(ctx context.Context, args []string) error {
 	outDir := fs.String("out", "", "output directory for .peipkg files (required, created if missing)")
 	signKeyPath := fs.String("sign-key", "", "path to an Ed25519 private key (PEM or 32-byte raw seed); empty = unsigned packages")
 
+	var buildEnvArgs stringList
+	fs.Var(&buildEnvArgs, "build-env", "NAME=VALUE injected into the build script env (repeatable; e.g. PKM_KACS_TCB_PUBKEY_HEX=...)")
+
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	buildEnv, err := parseBuildEnv(buildEnvArgs)
+	if err != nil {
 		return err
 	}
 	for name, val := range map[string]string{
@@ -228,6 +264,7 @@ func cmdBuild(ctx context.Context, args []string) error {
 		Timestamp:   *timestamp,
 		OutDir:      *outDir,
 		SignKey:     signKey,
+		BuildEnv:    buildEnv,
 		Stdout:      os.Stdout,
 		Stderr:      os.Stderr,
 	})
