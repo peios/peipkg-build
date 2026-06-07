@@ -174,6 +174,7 @@ func TestValidateAcceptsPermittedPaths(t *testing.T) {
 		{path: "usr/include/foo.h", kind: leafFile},
 		{path: "etc/foo/foo.conf", kind: leafFile},
 		{path: "opt/foo/bin/foo", kind: leafFile},
+		{path: "system/boot/prelude/init", kind: leafFile},
 	}
 	if err := runValidate(t, pkg, leaves); err != nil {
 		t.Errorf("expected accept, got: %v", err)
