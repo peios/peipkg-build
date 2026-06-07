@@ -158,9 +158,9 @@ type entry struct {
 	linkTarget string // symlinks only
 }
 
-// walkLeaves discovers every regular file and symlink under stagedRoot and
-// returns those for which selector permits inclusion. Directories are not
-// returned; ancestor directories are synthesised separately by withAncestorDirs.
+// walkLeaves discovers every regular file, symlink, and explicitly selected
+// directory under stagedRoot. Ancestor directories that are not selected here
+// are synthesized separately by withAncestorDirs.
 //
 // Special files (devices, FIFOs, sockets, hardlinks) are rejected: §3.4.4
 // permits only regular files, directories, and symlinks. A walk that
@@ -185,6 +185,9 @@ func walkLeaves(stagedRoot string, selector func(string) bool) ([]entry, error) 
 
 		switch {
 		case d.IsDir():
+			if selector != nil && selector(rel) {
+				leaves = append(leaves, entry{path: rel, kind: kindDir})
+			}
 			return nil
 		case d.Type()&os.ModeSymlink != 0:
 			if selector != nil && !selector(rel) {
@@ -228,6 +231,11 @@ func withAncestorDirs(leaves []entry) []entry {
 	seen := make(map[string]struct{}, len(leaves)*2)
 	out := make([]entry, 0, len(leaves)*2)
 	out = append(out, leaves...)
+	for _, e := range leaves {
+		if e.kind == kindDir {
+			seen[e.path] = struct{}{}
+		}
+	}
 
 	for _, e := range leaves {
 		for _, anc := range ancestorsOf(e.path) {

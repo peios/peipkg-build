@@ -228,6 +228,78 @@ func TestBuildHelloX8664Signed(t *testing.T) {
 	}
 }
 
+func TestBuildDirectoryOnlyPackage(t *testing.T) {
+	dir := t.TempDir()
+	recipeDir := filepath.Join(dir, "recipe")
+	sourceDir := filepath.Join(dir, "source")
+	if err := os.MkdirAll(recipeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(sourceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	recipePath := filepath.Join(recipeDir, "peipkg.toml")
+	if err := os.WriteFile(recipePath, []byte(`
+[meta]
+license = "MIT"
+homepage = "https://github.com/peios/peipkgs-official-recipes"
+build_script = "build.sh"
+
+[[package]]
+name = "fsbase"
+architecture = "noarch"
+description = "Peios base filesystem shape"
+files = [
+  "dev/",
+  "proc/",
+  "run/",
+  "sys/",
+  "tmp/",
+  "var/",
+]
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	buildScript := filepath.Join(recipeDir, "build.sh")
+	if err := os.WriteFile(buildScript, []byte(`#!/bin/sh
+set -eu
+mkdir -p "$DESTDIR/dev" "$DESTDIR/proc" "$DESTDIR/run" "$DESTDIR/sys" "$DESTDIR/tmp" "$DESTDIR/var"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := recipe.Load(recipePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outDir := t.TempDir()
+	res, err := builder.Build(context.Background(), builder.Config{
+		Recipe:      r,
+		BuildScript: buildScript,
+		SourceDir:   sourceDir,
+		Version:     "0.1.0-1",
+		SourceRef:   "test://fsbase",
+		FarmID:      "test-farm-1",
+		Timestamp:   "2026-05-06T12:00:00Z",
+		OutDir:      outDir,
+		Stdout:      io.Discard,
+		Stderr:      io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(res.Outputs) != 1 {
+		t.Fatalf("got %d outputs, want 1", len(res.Outputs))
+	}
+
+	names := tarEntryNames(t, mustRead(t, res.Outputs[0]))
+	for _, want := range []string{"dev/", "proc/", "run/", "sys/", "tmp/", "var/"} {
+		if !slices.Contains(names, want) {
+			t.Errorf("missing directory entry %q in archive; got %v", want, names)
+		}
+	}
+}
+
 // TestBuildLibfooMultipackage exercises the full pipeline against the
 // three-stanza libfoo fixture. Success criteria:
 //

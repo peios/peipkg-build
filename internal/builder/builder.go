@@ -151,7 +151,7 @@ func Build(ctx context.Context, cfg Config) (Result, error) {
 		return Result{}, err
 	}
 
-	leaves, err := collectLeaves(destDir)
+	leaves, err := collectLeaves(destDir, cfg.Recipe.Packages)
 	if err != nil {
 		return Result{}, fmt.Errorf("walk staged tree: %w", err)
 	}
@@ -344,6 +344,7 @@ type leafKind int
 const (
 	leafFile leafKind = iota
 	leafSymlink
+	leafDir
 )
 
 // leaf is the partition-time representation of one staged entry. linkTarget
@@ -355,12 +356,15 @@ type leaf struct {
 	linkTarget string
 }
 
-// collectLeaves returns every regular-file and symlink path under stagedRoot,
-// expressed as slash-separated paths relative to stagedRoot. Forbidden entry
-// types (devices, FIFOs, hardlinks) cause the build to fail rather than
-// being silently dropped — pack would reject them anyway and surfacing the
-// error here gives a clearer message.
-func collectLeaves(stagedRoot string) ([]leaf, error) {
+// collectLeaves returns every package-claimable path under stagedRoot,
+// expressed as slash-separated paths relative to stagedRoot. Regular files and
+// symlinks are always claimable. Directories are claimable only when a package
+// declares an explicit directory pattern ending in "/", keeping ordinary
+// parent directories synthesized by pack rather than assigned as payload.
+// Forbidden entry types (devices, FIFOs, hardlinks) cause the build to fail
+// rather than being silently dropped — pack would reject them anyway and
+// surfacing the error here gives a clearer message.
+func collectLeaves(stagedRoot string, packages []recipe.Package) ([]leaf, error) {
 	var out []leaf
 	err := filepath.WalkDir(stagedRoot, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -377,6 +381,13 @@ func collectLeaves(stagedRoot string) ([]leaf, error) {
 
 		switch {
 		case d.IsDir():
+			claimed, err := explicitDirClaim(rel, packages)
+			if err != nil {
+				return err
+			}
+			if claimed {
+				out = append(out, leaf{path: rel, kind: leafDir})
+			}
 			return nil
 		case d.Type()&os.ModeSymlink != 0:
 			target, err := os.Readlink(p)
@@ -395,6 +406,24 @@ func collectLeaves(stagedRoot string) ([]leaf, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+func explicitDirClaim(p string, packages []recipe.Package) (bool, error) {
+	for _, pkg := range packages {
+		for _, pattern := range pkg.Files {
+			if !strings.HasSuffix(pattern, "/") {
+				continue
+			}
+			ok, err := matchPackagePattern(pattern, leaf{path: p, kind: leafDir})
+			if err != nil {
+				return false, fmt.Errorf("package %s: invalid glob %q: %w", pkg.Name, pattern, err)
+			}
+			if ok {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 // partitionLeaves assigns each leaf to exactly one [[package]] by glob match.
@@ -418,7 +447,7 @@ func partitionLeaves(leaves []leaf, packages []recipe.Package) (map[string]map[s
 	var orphans []string
 
 	for _, l := range leaves {
-		matched, err := matchingPackages(l.path, packages)
+		matched, err := matchingPackages(l, packages)
 		if err != nil {
 			return nil, err
 		}
@@ -441,11 +470,11 @@ func partitionLeaves(leaves []leaf, packages []recipe.Package) (map[string]map[s
 
 // matchingPackages returns the names of every package whose Files glob list
 // matches path. A pattern parse error fails the whole build.
-func matchingPackages(path string, packages []recipe.Package) ([]string, error) {
+func matchingPackages(l leaf, packages []recipe.Package) ([]string, error) {
 	var matched []string
 	for _, p := range packages {
 		for _, pattern := range p.Files {
-			ok, err := doublestar.Match(pattern, path)
+			ok, err := matchPackagePattern(pattern, l)
 			if err != nil {
 				return nil, fmt.Errorf("package %s: invalid glob %q: %w", p.Name, pattern, err)
 			}
@@ -456,6 +485,13 @@ func matchingPackages(path string, packages []recipe.Package) ([]string, error) 
 		}
 	}
 	return matched, nil
+}
+
+func matchPackagePattern(pattern string, l leaf) (bool, error) {
+	if l.kind == leafDir && strings.HasSuffix(pattern, "/") {
+		pattern = strings.TrimRight(pattern, "/")
+	}
+	return doublestar.Match(pattern, l.path)
 }
 
 // emitPackage assembles the manifest for one stanza and calls pack to emit
@@ -625,6 +661,14 @@ var permittedTopLevels = []string{
 	"system/",
 }
 
+var permittedDirectoryOnlyRoots = map[string]bool{
+	"dev":  true,
+	"proc": true,
+	"run":  true,
+	"sys":  true,
+	"tmp":  true,
+}
+
 // validateClaims runs format-level checks across the post-partition
 // assignment of leaves to packages. Errors here mean the recipe author's
 // staged tree contains paths or symlinks that would produce a spec-invalid
@@ -669,6 +713,13 @@ func validateClaims(packages []recipe.Package, claims map[string]map[string]bool
 // install-destination rules: §3.4.1 permitted top-levels, §3.4.2 triplet
 // coherence, §3.4.4 var-must-be-empty.
 func validateLeafPath(p recipe.Package, l leaf) error {
+	if l.kind == leafDir {
+		if hasPermittedTopLevel(l.path) || permittedDirectoryOnlyRoots[l.path] {
+			return nil
+		}
+		return fmt.Errorf("package %s: directory %s is not under any §3.4.1 permitted top-level destination or permitted runtime mountpoint root", p.Name, l.path)
+	}
+
 	if !hasPermittedTopLevel(l.path) {
 		return fmt.Errorf("package %s: %s is not under any §3.4.1 permitted top-level destination", p.Name, l.path)
 	}
@@ -687,6 +738,9 @@ func validateLeafPath(p recipe.Package, l leaf) error {
 
 func hasPermittedTopLevel(p string) bool {
 	for _, top := range permittedTopLevels {
+		if p == strings.TrimSuffix(top, "/") {
+			return true
+		}
 		if strings.HasPrefix(p, top) {
 			return true
 		}

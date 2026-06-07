@@ -88,6 +88,24 @@ func TestPartitionLiteralPath(t *testing.T) {
 	}
 }
 
+func TestPartitionExplicitDirectoryPath(t *testing.T) {
+	leaves := []leaf{
+		{path: "proc", kind: leafDir},
+		{path: "sys", kind: leafDir},
+	}
+	packages := []recipe.Package{
+		{Name: "fsbase", Files: []string{"proc/", "sys/"}},
+	}
+
+	claims, err := partitionLeaves(leaves, packages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claims["fsbase"]["proc"] || !claims["fsbase"]["sys"] {
+		t.Fatalf("fsbase directory claims = %#v", claims["fsbase"])
+	}
+}
+
 func TestTimestampToEpochAcceptsZ(t *testing.T) {
 	got, err := timestampToEpoch("2026-05-06T12:00:00Z")
 	if err != nil {
@@ -175,9 +193,31 @@ func TestValidateAcceptsPermittedPaths(t *testing.T) {
 		{path: "etc/foo/foo.conf", kind: leafFile},
 		{path: "opt/foo/bin/foo", kind: leafFile},
 		{path: "system/boot/prelude/init", kind: leafFile},
+		{path: "var", kind: leafDir},
+		{path: "proc", kind: leafDir},
+		{path: "sys", kind: leafDir},
+		{path: "dev", kind: leafDir},
+		{path: "run", kind: leafDir},
+		{path: "tmp", kind: leafDir},
 	}
 	if err := runValidate(t, pkg, leaves); err != nil {
 		t.Errorf("expected accept, got: %v", err)
+	}
+}
+
+func TestValidateRejectsPopulatedRuntimeMountpoint(t *testing.T) {
+	pkg := recipe.Package{Name: "p", Architecture: "x86_64"}
+	for _, path := range []string{
+		"proc/version",
+		"sys/kernel",
+		"dev/null",
+		"run/service/socket",
+		"tmp/file",
+	} {
+		err := runValidate(t, pkg, []leaf{{path: path, kind: leafFile}})
+		if err == nil {
+			t.Errorf("path %q: expected rejection for populated runtime mountpoint", path)
+		}
 	}
 }
 
